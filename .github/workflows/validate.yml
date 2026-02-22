@@ -15,7 +15,7 @@ jobs:
         run: |
           bash -n fix-permissions.sh
 
-      - name: Smoke test audit mode
+      - name: Smoke test no-runtime failure path
         run: |
           TMP_MEDIA="$(mktemp -d)"
           mkdir -p "$TMP_MEDIA/config/sonarr" "$TMP_MEDIA/Downloads" "$TMP_MEDIA/TV Shows"
@@ -36,4 +36,8 @@ jobs:
           PGID=$(id -g)
           MEDIA_DIR=$TMP_MEDIA
           EOF
-          bash fix-permissions.sh --path "$TMP_MEDIA"
+          if bash fix-permissions.sh --path "$TMP_MEDIA" >"$TMP_MEDIA/out.txt" 2>&1; then
+            echo "Expected failure when no runtime is available in CI"
+            exit 1
+          fi
+          grep -q "No Docker runtime found" "$TMP_MEDIA/out.txt"
