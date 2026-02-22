@@ -182,12 +182,51 @@ ENV_FILE="$MEDIA_DIR/.env"
 ENV_PUID=""
 ENV_PGID=""
 
+env_value() {
+    local key="$1"
+    local file="${2:-}"
+    local value=""
+
+    if [[ -n "$file" ]] && [[ -f "$file" ]]; then
+        value=$(sed -n "s/^${key}=//p" "$file" | head -1 | tr -d '[:space:]')
+    fi
+    if [[ -z "$value" ]]; then
+        eval "value=\"\${$key:-}\""
+    fi
+    printf '%s\n' "$value"
+}
+
+expand_host_path() {
+    local path="$1"
+    local key value
+
+    path="${path//\\\$HOME/$HOME}"
+    path="${path//\$HOME/$HOME}"
+    path="${path/#\~/$HOME}"
+
+    while [[ "$path" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+        key="${BASH_REMATCH[1]}"
+        if [[ "$key" == "MEDIA_DIR" ]]; then
+            value="$MEDIA_DIR"
+        else
+            value="$(env_value "$key" "$ENV_FILE")"
+        fi
+
+        if [[ -z "$value" ]]; then
+            break
+        fi
+        path="${path//\$\{$key\}/$value}"
+    done
+
+    printf '%s\n' "$path"
+}
+
 if [[ -f "$ENV_FILE" ]]; then
     pass ".env file found"
 
     # Read PUID from .env
     if grep -q "^PUID=" "$ENV_FILE" 2>/dev/null; then
-        ENV_PUID=$(grep "^PUID=" "$ENV_FILE" | head -1 | cut -d'=' -f2 | tr -d '[:space:]')
+        ENV_PUID=$(env_value "PUID" "$ENV_FILE")
         if [[ "$ENV_PUID" == "$EXPECTED_PUID" ]]; then
             pass ".env PUID ($ENV_PUID) matches current user"
         else
@@ -199,7 +238,7 @@ if [[ -f "$ENV_FILE" ]]; then
 
     # Read PGID from .env
     if grep -q "^PGID=" "$ENV_FILE" 2>/dev/null; then
-        ENV_PGID=$(grep "^PGID=" "$ENV_FILE" | head -1 | cut -d'=' -f2 | tr -d '[:space:]')
+        ENV_PGID=$(env_value "PGID" "$ENV_FILE")
         if [[ "$ENV_PGID" == "$EXPECTED_PGID" ]]; then
             pass ".env PGID ($ENV_PGID) matches current group"
         else
@@ -309,15 +348,30 @@ echo ""
 # Check common media stack directories
 DIRS_TO_CHECK=(
     "config"
+    "Config"
     "downloads"
+    "Downloads"
     "movies"
+    "Movies"
     "tv"
+    "TV"
+    "TV Shows"
     "music"
+    "Music"
     "books"
+    "Books"
     "media"
+    "Media"
     "torrents"
+    "Torrents"
     "usenet"
+    "Usenet"
     "transcode"
+    "Transcode"
+    "logs"
+    "Logs"
+    "state"
+    "State"
     "backup"
     "backups"
 )
@@ -346,6 +400,7 @@ for dir in "${DIRS_TO_CHECK[@]}"; do
                     echo -e "${CYAN}FIX${NC}   Running: chown -R $EXPECTED_PUID:$EXPECTED_PGID $FULL_PATH"
                     sudo chown -R "$EXPECTED_PUID:$EXPECTED_PGID" "$FULL_PATH"
                     pass "$dir/ ownership fixed to $EXPECTED_PUID:$EXPECTED_PGID"
+                    FAIL_COUNT=$((FAIL_COUNT - 1))
                 fi
             fi
         fi
@@ -361,8 +416,7 @@ if [[ -n "$COMPOSE_FILE" ]]; then
     while IFS= read -r line; do
         if echo "$line" | grep -qE '^\s+- .+:.+'; then
             HOST_PATH=$(echo "$line" | sed 's/^[[:space:]]*- //' | cut -d':' -f1 | tr -d '"'"'"'')
-            # Expand variables
-            HOST_PATH=$(echo "$HOST_PATH" | sed "s|\\\${MEDIA_DIR}|$MEDIA_DIR|g" | sed "s|\${MEDIA_DIR}|$MEDIA_DIR|g")
+            HOST_PATH=$(expand_host_path "$HOST_PATH")
             # Skip if it's a named volume (no slash)
             if [[ "$HOST_PATH" == /* ]] && [[ -d "$HOST_PATH" ]]; then
                 DIR_UID=$(stat -f "%u" "$HOST_PATH")
@@ -384,6 +438,7 @@ if [[ -n "$COMPOSE_FILE" ]]; then
                             echo -e "${CYAN}FIX${NC}   Running: chown -R $EXPECTED_PUID:$EXPECTED_PGID $HOST_PATH"
                             sudo chown -R "$EXPECTED_PUID:$EXPECTED_PGID" "$HOST_PATH"
                             pass "Volume $SHORT_PATH ownership fixed"
+                            FAIL_COUNT=$((FAIL_COUNT - 1))
                         fi
                     fi
                 fi

@@ -82,6 +82,12 @@ bash fix-permissions.sh --fix --allow-outside-media-dir
 <img src="demo.gif" alt="Permission audit demo" width="700" />
 </details>
 
+<details>
+<summary>Fix mode demo</summary>
+<br>
+<img src="restore-demo.gif" alt="Permission fix demo" width="700" />
+</details>
+
 ## Fix Mode
 
 Run with `--fix` to automatically resolve permission issues:
@@ -89,6 +95,7 @@ Run with `--fix` to automatically resolve permission issues:
 - Runs `chown -R` on directories with wrong ownership
 - Reports what was changed
 - Protects paths outside `--path` by default (use `--allow-outside-media-dir` to override)
+- Exits non-zero only if unresolved failures remain after fixes
 
 The script never modifies docker-compose.yml or .env. It only fixes file ownership on disk.
 

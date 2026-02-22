@@ -14,3 +14,26 @@ jobs:
       - name: Validate shell scripts
         run: |
           bash -n fix-permissions.sh
+
+      - name: Smoke test audit mode
+        run: |
+          TMP_MEDIA="$(mktemp -d)"
+          mkdir -p "$TMP_MEDIA/config/sonarr" "$TMP_MEDIA/Downloads" "$TMP_MEDIA/TV Shows"
+          cat > "$TMP_MEDIA/docker-compose.yml" <<'EOF'
+          services:
+            sonarr:
+              image: lscr.io/linuxserver/sonarr:latest
+              environment:
+                - PUID=${PUID}
+                - PGID=${PGID}
+              volumes:
+                - ${MEDIA_DIR}/config/sonarr:/config
+                - ${MEDIA_DIR}/TV Shows:/tv
+                - ${MEDIA_DIR}/Downloads:/downloads
+          EOF
+          cat > "$TMP_MEDIA/.env" <<EOF
+          PUID=$(id -u)
+          PGID=$(id -g)
+          MEDIA_DIR=$TMP_MEDIA
+          EOF
+          bash fix-permissions.sh --path "$TMP_MEDIA"
