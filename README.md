@@ -69,6 +69,9 @@ bash fix-permissions.sh --fix
 
 # Fix with custom path
 bash fix-permissions.sh --fix --path /Volumes/Media
+
+# Allow fixes for compose mounts outside --path
+bash fix-permissions.sh --fix --allow-outside-media-dir
 ```
 
 ## Example Output
@@ -98,6 +101,7 @@ Run with `--fix` to automatically resolve permission issues:
 
 - Runs `chown -R` on directories with wrong ownership
 - Reports what was changed
+- Protects paths outside `--path` by default (use `--allow-outside-media-dir` to override)
 
 The script never modifies docker-compose.yml or .env. It only fixes file ownership on disk.
 

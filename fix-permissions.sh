@@ -13,6 +13,7 @@ NC='\033[0m'
 # Defaults
 MEDIA_DIR="$HOME/Media"
 FIX_MODE=false
+ALLOW_OUTSIDE_MEDIA_DIR=false
 PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
@@ -30,6 +31,7 @@ usage() {
     echo "Options:"
     echo "  --fix         Fix permission issues (chown directories)"
     echo "  --path DIR    Path to media directory (default: ~/Media)"
+    echo "  --allow-outside-media-dir  Allow --fix to chown compose mounts outside --path"
     echo "  --help        Show this help message"
     echo ""
     echo "Examples:"
@@ -37,6 +39,8 @@ usage() {
     echo "  bash fix-permissions.sh --path /Volumes/Media"
     echo "  bash fix-permissions.sh --fix"
     echo "  bash fix-permissions.sh --fix --path /Volumes/Media"
+    echo "  bash fix-permissions.sh --fix --allow-outside-media-dir"
+    exit "${1:-0}"
 }
 
 pass() {
@@ -62,20 +66,48 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --path)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --path"
+                usage 1
+            fi
             MEDIA_DIR="$2"
             shift 2
             ;;
+        --allow-outside-media-dir)
+            ALLOW_OUTSIDE_MEDIA_DIR=true
+            shift
+            ;;
         --help)
             usage
-            exit 0
             ;;
         *)
             echo "Unknown option: $1"
-            usage
-            exit 1
+            usage 1
             ;;
     esac
 done
+
+MEDIA_DIR="${MEDIA_DIR/#\~/$HOME}"
+
+canonical_dir() {
+    local input="$1"
+    if [[ -d "$input" ]]; then
+        (cd "$input" 2>/dev/null && pwd -P)
+    else
+        return 1
+    fi
+}
+
+is_path_under() {
+    local candidate="$1"
+    local root="$2"
+    [[ "$candidate" == "$root" || "$candidate" == "$root/"* ]]
+}
+
+MEDIA_DIR_REAL=""
+if [[ -d "$MEDIA_DIR" ]]; then
+    MEDIA_DIR_REAL=$(canonical_dir "$MEDIA_DIR" || true)
+fi
 
 echo ""
 echo "=============================="
@@ -121,6 +153,22 @@ elif [[ -f "$MEDIA_DIR/docker-compose.yaml" ]]; then
     pass "docker-compose.yaml found at $COMPOSE_FILE"
 else
     fail "No docker-compose.yml found in $MEDIA_DIR"
+fi
+
+echo ""
+echo "=============================="
+echo "  Compose Parse Check"
+echo "=============================="
+echo ""
+
+if [[ -n "$COMPOSE_FILE" ]]; then
+    if (cd "$MEDIA_DIR" && docker compose -f "$COMPOSE_FILE" config >/dev/null 2>&1); then
+        pass "Compose file parses successfully"
+    else
+        warn "Compose file failed to parse with 'docker compose config'"
+    fi
+else
+    warn "Skipping compose parse check (no compose file)"
 fi
 
 echo ""
@@ -172,11 +220,28 @@ echo ""
 
 # Parse PUID/PGID from docker-compose.yml for each service
 if [[ -n "$COMPOSE_FILE" ]]; then
+    resolve_compose_id() {
+        local raw="$1"
+        local key="$2"
+        local env_value="$3"
+        local cleaned
+        cleaned=$(echo "$raw" | sed 's/#.*$//' | tr -d '[:space:]"'"'"'')
+        if [[ "$cleaned" == "\${$key}" || "$cleaned" == "\$$key" ]]; then
+            if [[ -n "$env_value" ]]; then
+                echo "$env_value"
+            else
+                echo "unset"
+            fi
+        else
+            echo "$cleaned"
+        fi
+    }
+
     # Extract service names and their PUID/PGID values
     CURRENT_SERVICE=""
     PUID_MISMATCHES=()
     PGID_MISMATCHES=()
-    SERVICES_CHECKED=0
+    ENTRIES_CHECKED=0
 
     while IFS= read -r line; do
         # Detect service name (top-level key under services, indented with 2 spaces)
@@ -184,36 +249,44 @@ if [[ -n "$COMPOSE_FILE" ]]; then
             CURRENT_SERVICE=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/://')
         fi
 
-        # Detect PUID
-        if echo "$line" | grep -qE '^\s+- PUID='; then
-            SVC_PUID=$(echo "$line" | sed 's/.*PUID=//' | tr -d '[:space:]"'"'"'')
-            # Resolve variable references
-            if [[ "$SVC_PUID" == '${PUID}' ]] || [[ "$SVC_PUID" == '$PUID' ]]; then
-                SVC_PUID="${ENV_PUID:-unset}"
-            fi
-            SERVICES_CHECKED=$((SERVICES_CHECKED + 1))
+        # Detect PUID (list syntax: - PUID=..., mapping syntax: PUID: ...)
+        SVC_PUID=""
+        if echo "$line" | grep -qE '^\s*-\s*PUID='; then
+            RAW_PUID=$(echo "$line" | sed 's/.*PUID=//')
+            SVC_PUID=$(resolve_compose_id "$RAW_PUID" "PUID" "$ENV_PUID")
+        elif echo "$line" | grep -qE '^\s*PUID:\s*'; then
+            RAW_PUID=$(echo "$line" | sed -E 's/^[[:space:]]*PUID:[[:space:]]*//')
+            SVC_PUID=$(resolve_compose_id "$RAW_PUID" "PUID" "$ENV_PUID")
+        fi
+        if [[ -n "$SVC_PUID" ]]; then
+            ENTRIES_CHECKED=$((ENTRIES_CHECKED + 1))
             if [[ "$SVC_PUID" != "$EXPECTED_PUID" ]]; then
                 PUID_MISMATCHES+=("$CURRENT_SERVICE uses PUID=$SVC_PUID, expected $EXPECTED_PUID")
             fi
         fi
 
-        # Detect PGID
-        if echo "$line" | grep -qE '^\s+- PGID='; then
-            SVC_PGID=$(echo "$line" | sed 's/.*PGID=//' | tr -d '[:space:]"'"'"'')
-            if [[ "$SVC_PGID" == '${PGID}' ]] || [[ "$SVC_PGID" == '$PGID' ]]; then
-                SVC_PGID="${ENV_PGID:-unset}"
-            fi
+        # Detect PGID (list syntax: - PGID=..., mapping syntax: PGID: ...)
+        SVC_PGID=""
+        if echo "$line" | grep -qE '^\s*-\s*PGID='; then
+            RAW_PGID=$(echo "$line" | sed 's/.*PGID=//')
+            SVC_PGID=$(resolve_compose_id "$RAW_PGID" "PGID" "$ENV_PGID")
+        elif echo "$line" | grep -qE '^\s*PGID:\s*'; then
+            RAW_PGID=$(echo "$line" | sed -E 's/^[[:space:]]*PGID:[[:space:]]*//')
+            SVC_PGID=$(resolve_compose_id "$RAW_PGID" "PGID" "$ENV_PGID")
+        fi
+        if [[ -n "$SVC_PGID" ]]; then
+            ENTRIES_CHECKED=$((ENTRIES_CHECKED + 1))
             if [[ "$SVC_PGID" != "$EXPECTED_PGID" ]]; then
                 PGID_MISMATCHES+=("$CURRENT_SERVICE uses PGID=$SVC_PGID, expected $EXPECTED_PGID")
             fi
         fi
     done < "$COMPOSE_FILE"
 
-    if [[ $SERVICES_CHECKED -eq 0 ]]; then
+    if [[ $ENTRIES_CHECKED -eq 0 ]]; then
         warn "No PUID/PGID environment variables found in compose file"
     else
         if [[ ${#PUID_MISMATCHES[@]} -eq 0 ]] && [[ ${#PGID_MISMATCHES[@]} -eq 0 ]]; then
-            pass "All $SERVICES_CHECKED services use consistent PUID/PGID ($EXPECTED_PUID:$EXPECTED_PGID)"
+            pass "All $ENTRIES_CHECKED PUID/PGID entries match expected $EXPECTED_PUID:$EXPECTED_PGID"
         else
             for msg in "${PUID_MISMATCHES[@]+"${PUID_MISMATCHES[@]}"}"; do
                 [[ -n "$msg" ]] && warn "PUID mismatch: $msg"
@@ -246,6 +319,7 @@ DIRS_TO_CHECK=(
     "usenet"
     "transcode"
     "backup"
+    "backups"
 )
 
 DIRS_FOUND=0
@@ -261,9 +335,18 @@ for dir in "${DIRS_TO_CHECK[@]}"; do
         else
             fail "$dir/ owned by $DIR_UID:$DIR_GID, expected $EXPECTED_PUID:$EXPECTED_PGID"
             if [[ "$FIX_MODE" == true ]]; then
-                echo -e "${CYAN}FIX${NC}   Running: chown -R $EXPECTED_PUID:$EXPECTED_PGID $FULL_PATH"
-                sudo chown -R "$EXPECTED_PUID:$EXPECTED_PGID" "$FULL_PATH"
-                pass "$dir/ ownership fixed to $EXPECTED_PUID:$EXPECTED_PGID"
+                DIR_REAL=$(canonical_dir "$FULL_PATH" || true)
+                ALLOW_FIX=true
+                if [[ "$ALLOW_OUTSIDE_MEDIA_DIR" != true ]] && [[ -n "$MEDIA_DIR_REAL" ]] && [[ -n "$DIR_REAL" ]] && ! is_path_under "$DIR_REAL" "$MEDIA_DIR_REAL"; then
+                    ALLOW_FIX=false
+                    warn "Skipping fix for $dir/ because it resolves outside $MEDIA_DIR (use --allow-outside-media-dir to override)"
+                fi
+
+                if [[ "$ALLOW_FIX" == true ]]; then
+                    echo -e "${CYAN}FIX${NC}   Running: chown -R $EXPECTED_PUID:$EXPECTED_PGID $FULL_PATH"
+                    sudo chown -R "$EXPECTED_PUID:$EXPECTED_PGID" "$FULL_PATH"
+                    pass "$dir/ ownership fixed to $EXPECTED_PUID:$EXPECTED_PGID"
+                fi
             fi
         fi
     fi
@@ -284,15 +367,24 @@ if [[ -n "$COMPOSE_FILE" ]]; then
             if [[ "$HOST_PATH" == /* ]] && [[ -d "$HOST_PATH" ]]; then
                 DIR_UID=$(stat -f "%u" "$HOST_PATH")
                 DIR_GID=$(stat -f "%g" "$HOST_PATH")
+                HOST_PATH_REAL=$(canonical_dir "$HOST_PATH" || true)
                 SHORT_PATH=$(echo "$HOST_PATH" | sed "s|$HOME|~|")
                 if [[ "$DIR_UID" == "$EXPECTED_PUID" ]] && [[ "$DIR_GID" == "$EXPECTED_PGID" ]]; then
                     pass "Volume $SHORT_PATH owned by you ($DIR_UID:$DIR_GID)"
                 else
                     fail "Volume $SHORT_PATH owned by $DIR_UID:$DIR_GID, expected $EXPECTED_PUID:$EXPECTED_PGID"
                     if [[ "$FIX_MODE" == true ]]; then
-                        echo -e "${CYAN}FIX${NC}   Running: chown -R $EXPECTED_PUID:$EXPECTED_PGID $HOST_PATH"
-                        sudo chown -R "$EXPECTED_PUID:$EXPECTED_PGID" "$HOST_PATH"
-                        pass "Volume $SHORT_PATH ownership fixed"
+                        ALLOW_FIX=true
+                        if [[ "$ALLOW_OUTSIDE_MEDIA_DIR" != true ]] && [[ -n "$MEDIA_DIR_REAL" ]] && [[ -n "$HOST_PATH_REAL" ]] && ! is_path_under "$HOST_PATH_REAL" "$MEDIA_DIR_REAL"; then
+                            ALLOW_FIX=false
+                            warn "Skipping fix for $SHORT_PATH (outside $MEDIA_DIR). Use --allow-outside-media-dir to override."
+                        fi
+
+                        if [[ "$ALLOW_FIX" == true ]]; then
+                            echo -e "${CYAN}FIX${NC}   Running: chown -R $EXPECTED_PUID:$EXPECTED_PGID $HOST_PATH"
+                            sudo chown -R "$EXPECTED_PUID:$EXPECTED_PGID" "$HOST_PATH"
+                            pass "Volume $SHORT_PATH ownership fixed"
+                        fi
                     fi
                 fi
             fi
