@@ -398,6 +398,51 @@ echo "  Full Disk Access"
 echo "=============================="
 echo ""
 
+# Best-effort runtime probe: if a running container can see one of its bind-mounted
+# media paths, we treat disk access as effectively working even when TCC rows vary.
+runtime_bind_access_probe() {
+    if [[ -z "$COMPOSE_FILE" ]]; then
+        return 1
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local container_ids
+    container_ids="$(cd "$MEDIA_DIR" && docker compose -f "$COMPOSE_FILE" ps -q 2>/dev/null || true)"
+    if [[ -z "$container_ids" ]]; then
+        return 1
+    fi
+
+    local cid src dst src_real
+    while IFS= read -r cid; do
+        [[ -n "$cid" ]] || continue
+        while IFS='|' read -r src dst; do
+            [[ -n "$src" && -n "$dst" ]] || continue
+            if [[ ! -e "$src" ]]; then
+                continue
+            fi
+
+            src_real="$src"
+            if [[ -d "$src" ]]; then
+                src_real="$(canonical_dir "$src" || echo "$src")"
+            fi
+
+            if [[ -n "$MEDIA_DIR_REAL" ]] && ! is_path_under "$src_real" "$MEDIA_DIR_REAL" && [[ "$src" != /Volumes/* ]]; then
+                continue
+            fi
+
+            if docker exec "$cid" sh -lc "test -e \"$dst\"" >/dev/null 2>&1 || \
+               docker exec "$cid" /bin/sh -lc "test -e \"$dst\"" >/dev/null 2>&1; then
+                echo "$src|$dst"
+                return 0
+            fi
+        done < <(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{printf "%s|%s\n" .Source .Destination}}{{end}}{{end}}' "$cid" 2>/dev/null || true)
+    done <<< "$container_ids"
+
+    return 1
+}
+
 # Check Full Disk Access
 # macOS stores FDA grants in a TCC database. We can check if the binary is listed,
 # but the most reliable method is checking if we can read a protected path.
@@ -409,18 +454,40 @@ elif [[ "$RUNTIME" == "docker-desktop" ]]; then
 fi
 
 if [[ -n "$FDA_APP" ]]; then
-    # Try to detect via TCC database (read-only check)
+    FDA_CONFIRMED=false
+    FDA_PATTERN="docker"
+    if [[ "$RUNTIME" == "orbstack" ]]; then
+        FDA_PATTERN="orbstack"
+    fi
+
+    # First try TCC database (read-only check). macOS versions can store grants
+    # under different services, so check for any positive auth row for the runtime.
     TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-    if [[ -r "$TCC_DB" ]]; then
-        if sqlite3 "$TCC_DB" "SELECT client FROM access WHERE service='kTCCServiceSystemPolicyAllFiles'" 2>/dev/null | grep -qi "$FDA_APP"; then
-            pass "Full Disk Access granted for $FDA_APP"
-        else
-            warn "Full Disk Access not confirmed for $FDA_APP"
-            echo "      Check: System Settings > Privacy & Security > Full Disk Access"
+    if [[ -r "$TCC_DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        if sqlite3 "$TCC_DB" "SELECT lower(client),auth_value FROM access;" 2>/dev/null | \
+           awk -F'|' -v pat="$FDA_PATTERN" '$1 ~ pat && ($2+0) > 0 {found=1} END{exit(found?0:1)}'; then
+            FDA_CONFIRMED=true
+            pass "Disk access permission entry found for $FDA_APP in macOS privacy database"
         fi
-    else
-        warn "Cannot read TCC database to verify Full Disk Access for $FDA_APP"
-        echo "      Manually check: System Settings > Privacy & Security > Full Disk Access"
+    fi
+
+    # Fallback: if a running container can access one of its media bind mounts,
+    # treat disk access as effectively working even when TCC is not explicit.
+    if [[ "$FDA_CONFIRMED" == false ]]; then
+        PROBE_RESULT="$(runtime_bind_access_probe || true)"
+        if [[ -n "$PROBE_RESULT" ]]; then
+            PROBE_SRC="${PROBE_RESULT%%|*}"
+            PROBE_DST="${PROBE_RESULT#*|}"
+            PROBE_SRC_SHORT="$(echo "$PROBE_SRC" | sed "s|$HOME|~|")"
+            pass "Runtime bind-mount probe succeeded for $FDA_APP ($PROBE_SRC_SHORT -> $PROBE_DST)"
+            FDA_CONFIRMED=true
+        fi
+    fi
+
+    if [[ "$FDA_CONFIRMED" == false ]]; then
+        warn "Full Disk Access not confirmed for $FDA_APP (best-effort check)"
+        echo "      Check: System Settings > Privacy & Security > Full Disk Access"
+        echo "      If your containers can read/write media paths, this warning can be ignored."
     fi
 else
     warn "Unknown runtime, skipping Full Disk Access check"

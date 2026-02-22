@@ -38,7 +38,7 @@ This script audits everything in one pass and tells you exactly what's wrong.
 | **PUID/PGID consistency** | All containers using the same user/group IDs |
 | **.env validation** | PUID/PGID set and matching your current user |
 | **Volume permissions** | Host directories owned by the expected user |
-| **Full Disk Access** | Docker/OrbStack has macOS disk access permissions |
+| **Full Disk Access** | Best-effort macOS privacy check + runtime bind-mount probe |
 | **Compose config** | docker-compose.yml exists and is parseable |
 
 ## Quick Start
