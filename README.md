@@ -74,26 +74,13 @@ bash fix-permissions.sh --fix --path /Volumes/Media
 bash fix-permissions.sh --fix --allow-outside-media-dir
 ```
 
-## Example Output
+## See It In Action
 
-```
-==============================
-  Permission Audit
-==============================
-
-OK    Runtime: OrbStack detected
-OK    docker-compose.yml found at /Users/you/Media/docker-compose.yml
-OK    .env PUID (501) matches current user
-OK    .env PGID (20) matches current group
-WARN  PUID mismatch: sonarr uses 1000, expected 501
-OK    config/ owned by you (501:20)
-FAIL  downloads/ owned by root (0:0), expected 501:20
-WARN  Full Disk Access not confirmed for OrbStack
-
-==============================
-  Summary: 4 passed, 2 warnings, 1 failed
-==============================
-```
+<details>
+<summary>Demo</summary>
+<br>
+<img src="demo.gif" alt="Permission audit demo" width="700" />
+</details>
 
 ## Fix Mode
 
